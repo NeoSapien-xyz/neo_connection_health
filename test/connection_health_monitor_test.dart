@@ -616,8 +616,8 @@ void main() {
     // Error escapes the SERVER probe. In debug the guard's assert surfaces the
     // programmer bug loudly (asserts are stripped in release, where it instead
     // falls back to currentState and reschedules — that release path cannot be
-    // exercised with asserts enabled, and is covered by code review). The
-    // _loop-path guard is identical code; this test pins the shared guard.
+    // exercised with asserts enabled, and is covered by code review). This
+    // pins the checkNow guard only; 8g pins the _loop guard.
     // -------------------------------------------------------------------
     test('8f: checkNow() surfaces an escaped Error via assert in debug', () {
       fakeAsync((async) {
@@ -650,6 +650,69 @@ void main() {
         async.flushMicrotasks();
         expect(monitor.currentState, ConnectionHealthState.healthy);
 
+        monitor.dispose();
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // 8g: the _loop twin of 8f. A non-Exception Error escaping the server
+    // probe on a SCHEDULED tick must hit _loop's last-resort guard and surface
+    // via its assert in debug. Without the guard the Error escapes raw (not as
+    // an AssertionError), so deleting the guard fails this test.
+    // -------------------------------------------------------------------
+    test('8g: _loop surfaces an escaped Error via assert in debug', () {
+      final errors = <Object>[];
+      runZonedGuarded(() {
+        fakeAsync((async) {
+          final monitor = _build(
+            httpClient: MockClient((_) async => throw _SimulatedNullError()),
+            internetChecker: _FakeInternetConnection(online: true),
+          );
+          monitor.start();
+          async.flushMicrotasks();
+          monitor.dispose();
+        });
+      }, (e, _) => errors.add(e));
+      expect(
+        errors,
+        [isA<AssertionError>()],
+        reason: 'the _loop guard must catch the escaped Error and surface it '
+            'through its assert, not let it escape raw',
+      );
+    });
+
+    // -------------------------------------------------------------------
+    // 8b-exc: the checker throws an ordinary Exception (not an Error). Before
+    // 0.4.2 `on Exception` mapped this to offline; it now falls through to
+    // `on Object` and is inconclusive like any other non-timeout throw — the
+    // tick is skipped and the last banner preserved. Pins that mapping.
+    // -------------------------------------------------------------------
+    test('8b-exc: checker throwing an Exception skips the tick', () {
+      fakeAsync((async) {
+        final emissions = <ConnectionHealthState>[];
+        final checker = _FakeInternetConnection(online: true);
+        var serverOk = true;
+        final monitor = _build(
+          httpClient:
+              MockClient((_) async => http.Response('', serverOk ? 200 : 500)),
+          internetChecker: checker,
+          retryInterval: const Duration(seconds: 10),
+          healthyInterval: const Duration(seconds: 10),
+        );
+        monitor.stream.listen(emissions.add);
+        monitor.start();
+        async.flushMicrotasks();
+        expect(emissions, [ConnectionHealthState.healthy]);
+
+        serverOk = false;
+        checker.throwOnCheck = Exception('plugin');
+        async.elapse(const Duration(seconds: 11));
+        async.flushMicrotasks();
+        expect(
+          emissions,
+          [ConnectionHealthState.healthy],
+          reason: 'an Exception from the checker is inconclusive, not offline',
+        );
         monitor.dispose();
       });
     });
